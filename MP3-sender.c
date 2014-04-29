@@ -11,24 +11,30 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <pthread.h>
 
 #define WINDOW_SIZE 40
 #define PACKET_SIZE 1472
-#define HEADER_SIZE 4
+#define INT_SIZE sizeof(int)
+#define HEADER_SIZE 2*INT_SIZE
 #define TIMEOUT 2
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
 		char* filename, unsigned long long int bytesToTransfer);
-void sendPacket(int sockfd, char* message);
+void sendPacket(char* packet);
 int establisb_send_connection(char* host);
 int establish_receive_connection();
-char* readFile(int size);
+int is_window_entry_timedout(int index);
+void *listen_for_ack(void* data);
+int window_has_room();
 struct addrinfo hints, *servinfo, *p;
 
 int send_socket;
 int receive_socket;
 int current_seq = 0;
 int window_start = -1;
+
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Pointer to the file to be sent */
 FILE* fp;
@@ -48,12 +54,12 @@ struct SlidingWindow window[WINDOW_SIZE];
 /* Maps the actual sequence number to a index in sliding window */
 int map_seq_to_window(int seq) {
 	int index = seq % WINDOW_SIZE;
-	return index ;
+	return index;
 }
 
 void init(char* filename, int udpPort) {
-	int i=0;
-	for(i=0; i < WINDOW_SIZE; i++) {
+	int i = 0;
+	for (i = 0; i < WINDOW_SIZE; i++) {
 		window[i].ack = 0;
 		window[i].seq = 0;
 		window[i].time_sent = 0;
@@ -84,27 +90,39 @@ int main(int argc, char** argv) {
 }
 
 void reliablyTransfer(char* hostName, unsigned short int udpPort,
-	char* fileName, unsigned long long int numBytes) {
+		char* fileName, unsigned long long int numBytes) {
 
 	init(fileName, udpPort);
 
 	/* Opens the connection for sending packets */
 	send_socket = establisb_send_connection(hostName);
 
-	/* Loop through the file content and send packets to fill a window */
-	while(1) {
-		// Sending next packet if there is roon in sliding window
-		if (window_has_room() ) {
-			char* packet = malloc(PACKET_SIZE);
-			char* data = readFile(PACKET_SIZE - HEADER_SIZE);
-			char header[HEADER_SIZE];
-			/* Header contains sequence number */
-			sprintf(header,"%d",current_seq);
+	/* Start listening for ack */
+	pthread_t thread;
+	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
 
-			/* Copy data to packet */
-			memcpy(packet, data, PACKET_SIZE - HEADER_SIZE);
-			/* Copy header to packet */
-			memcpy(packet + (PACKET_SIZE - HEADER_SIZE), header, HEADER_SIZE);
+	/* Loop through the file content and send packets to fill a window */
+	while (1) {
+		// Sending next packet if there is room in sliding window
+		if (feof(fp)) {
+			printf("file is sent completely\n");
+			sleep(2);
+			//TODO: check if all packets are acked successfully then exit.
+		} else if (window_has_room()) {
+			pthread_mutex_lock(&lock);
+			char* packet = calloc(PACKET_SIZE, 1);
+			char* data_block = malloc(PACKET_SIZE - HEADER_SIZE);
+			size_t content_size = fread(data_block, 1,
+					PACKET_SIZE - HEADER_SIZE, fp);
+
+			/* Copy sequence number  to packet */
+			memcpy(packet, &current_seq, INT_SIZE);
+
+			/* Copy payload size to packet */
+			memcpy(packet + INT_SIZE, &content_size, INT_SIZE);
+
+			/* Copy payload to packet */
+			memcpy(packet + HEADER_SIZE, data_block, PACKET_SIZE - HEADER_SIZE);
 
 			/* Create a window entry */
 			int index = map_seq_to_window(current_seq);
@@ -113,20 +131,24 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			window[index].ack = 0;
 			window[index].time_sent = (int) time(NULL);
 
-			// TODO: send packet
-
+			sendPacket(packet);
 			current_seq++;
+			pthread_mutex_unlock(&lock);
+		} else {
+			printf("Window is full\n");
+			sleep(2);
 		}
 		// check sent packets and re-send timed out ones
-		int i = 0 ;
-		for(i=0; i < WINDOW_SIZE; i++) {
-			if (is_window_entry_timedout(i)) {
-				// TODO: resend packet
+		int i = 0;
+		for (i = 0; i < WINDOW_SIZE; i++) {
+			struct SlidingWindow entry = window[i];
+			if (entry.data && is_window_entry_timedout(i)) {
+				printf("packet %d is timed out.\n", entry.seq);
+				entry.time_sent = (int) time(NULL);
+				sendPacket(entry.data);
 			}
 		}
 	}
-
-	sendPacket(send_socket,"Hello Server!");
 }
 
 int is_window_entry_timedout(int index) {
@@ -135,7 +157,7 @@ int is_window_entry_timedout(int index) {
 	if (now - entry.time_sent >= TIMEOUT) {
 		return 1;
 	}
-	return 0 ;
+	return 0;
 }
 
 int window_has_room() {
@@ -144,16 +166,8 @@ int window_has_room() {
 	return 0;
 }
 
-//void reset_window_entry(index) {
-//	struct SlidingWindow entry = window[index];
-//	free(entry.data);
-//	entry.data = NULL;
-//	entry.ack = 0;
-//	entry.time_sent = 0;
-//	entry.seq = 1;
-//}
-
 void ack_packet(int seq) {
+	pthread_mutex_lock(&lock);
 	int index = map_seq_to_window(seq);
 	struct SlidingWindow entry = window[index];
 	entry.ack = 1;
@@ -163,8 +177,9 @@ void ack_packet(int seq) {
 
 	// Slide window as more packets get ack
 	while (window[map_seq_to_window(window_start + 1)].ack) {
-		window_start ++;
+		window_start++;
 	}
+	pthread_mutex_unlock(&lock);
 }
 
 int establish_receive_connection() {
@@ -204,7 +219,7 @@ int establish_receive_connection() {
 		return 2;
 	}
 	freeaddrinfo(servinfo);
-	printf("listener: waiting to recvfrom...\n");
+	//printf("listener: waiting to recvfrom...\n");
 	return sockfd;
 }
 
@@ -239,20 +254,38 @@ int establisb_send_connection(char* hostname) {
 	return sockfd;
 }
 
-void sendPacket(int sockfd, char* message) {
-	int numbytes;
-	if ((numbytes = sendto(sockfd, message, strlen(message), 0, p->ai_addr,
-			p->ai_addrlen)) == -1) {
-		perror("talker: sendto");
-		exit(1);
-	}
-
-	freeaddrinfo(p);
-	close(sockfd);
+void sendPacket(char* packet) {
+	char buffer[PACKET_SIZE + 1];
+	int seq;
+	int size;
+	memcpy(&seq, packet, sizeof(int));
+	memcpy(&size, packet + sizeof(int), sizeof(int));
+	memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
+	buffer[PACKET_SIZE] = '\0';
+	printf("Packet %d with size %d to send is : %s \n", seq, size, buffer);
+//	int numbytes;
+//	if ((numbytes = sendto(send_socket, packet, PACKET_SIZE, 0, p->ai_addr,
+//			p->ai_addrlen)) == -1) {
+//		perror("packet send:");
+//		exit(1);
+//	}
 }
 
-char* readFile(int size) {
-	char* block = malloc(size);
-	fread(block, 1, size, fp);
-	return block;
+void *listen_for_ack(void* data) {
+	printf("listening thread is started ...\n");
+	receive_socket = establish_receive_connection();
+	struct sockaddr_storage their_addr;
+	socklen_t addr_len = sizeof their_addr;
+	while (1) {
+		int numbytes;
+		char buf[INT_SIZE];
+		if ((numbytes = recvfrom(receive_socket, buf, INT_SIZE - 1, 0,
+				(struct sockaddr *) &their_addr, &addr_len)) == -1) {
+			perror("ack recv");
+			exit(1);
+		}
+		int ack_seq;
+		memcpy(&ack_seq, buf, INT_SIZE);
+		ack_packet(ack_seq);
+	}
 }
