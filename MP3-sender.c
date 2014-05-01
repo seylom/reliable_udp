@@ -13,6 +13,8 @@
 #include <time.h>
 #include <pthread.h>
 
+#include "helper.h"
+
 #define WINDOW_SIZE 40
 #define PACKET_SIZE 1472
 #define INT_SIZE sizeof(int)
@@ -27,7 +29,9 @@ int establish_receive_connection();
 int is_window_entry_timedout(int index);
 void *listen_for_ack(void* data);
 int window_has_room();
+
 struct addrinfo hints, *servinfo, *p;
+struct addrinfo *sender_info, *receiver_info;
 
 int send_socket;
 int receive_socket;
@@ -41,6 +45,7 @@ FILE* fp;
 
 /* Port number for sending and receiving */
 char port[6];
+char ack_port[6];
 
 /* Sliding Window data structure*/
 struct SlidingWindow {
@@ -70,6 +75,7 @@ void init(char* filename, int udpPort) {
 
 	// Convert port to string
 	sprintf(port, "%d", udpPort);
+	sprintf(ack_port,"%d", udpPort + 5);
 }
 
 int main(int argc, char** argv) {
@@ -101,16 +107,23 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	pthread_t thread;
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
 
+    int notified_completed = 0;
+    
 	/* Loop through the file content and send packets to fill a window */
 	while (1) {
 		// Sending next packet if there is room in sliding window
 		if (feof(fp)) {
-			printf("file is sent completely\n");
+			
+			if (notified_completed == 0){
+			    //notified_completed = 1;
+			    printf("file is sent completely\n");
+			}
+			
 			sleep(2);
 			//TODO: check if all packets are acked successfully then exit.
 		} else if (window_has_room()) {
 			pthread_mutex_lock(&lock);
-			char* packet = calloc(PACKET_SIZE, 1);
+			char* packet = calloc(PACKET_SIZE + HEADER_SIZE, 1);
 			char* data_block = malloc(PACKET_SIZE - HEADER_SIZE);
 			size_t content_size = fread(data_block, 1,
 					PACKET_SIZE - HEADER_SIZE, fp);
@@ -130,7 +143,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			window[index].data = packet;
 			window[index].ack = 0;
 			window[index].time_sent = (int) time(NULL);
-
+			
 			sendPacket(packet);
 			current_seq++;
 			pthread_mutex_unlock(&lock);
@@ -139,15 +152,23 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			sleep(2);
 		}
 		// check sent packets and re-send timed out ones
+		
+		int expected_ack = 0;
+		
 		int i = 0;
 		for (i = 0; i < WINDOW_SIZE; i++) {
 			struct SlidingWindow entry = window[i];
 			if (entry.data && is_window_entry_timedout(i)) {
+			    
 				printf("packet %d is timed out.\n", entry.seq);
 				entry.time_sent = (int) time(NULL);
 				sendPacket(entry.data);
+				
+				expected_ack++;
 			}
 		}
+		
+		printf("Number of expected ACK %d\n",  expected_ack);
 	}
 }
 
@@ -170,10 +191,10 @@ void ack_packet(int seq) {
 	pthread_mutex_lock(&lock);
 	int index = map_seq_to_window(seq);
 	struct SlidingWindow entry = window[index];
-	entry.ack = 1;
-	entry.seq = 0;
-	free(entry.data);
-	entry.data = NULL;
+	window[index].ack = 1;
+	window[index].seq = 0;
+	free(window[index].data);
+	window[index].data = NULL;
 
 	// Slide window as more packets get ack
 	while (window[map_seq_to_window(window_start + 1)].ack) {
@@ -192,7 +213,7 @@ int establish_receive_connection() {
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE; // use my IP
 
-	if ((rv = getaddrinfo(NULL, port, &hints, &servinfo)) != 0) {
+	if ((rv = getaddrinfo(NULL, ack_port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
 	}
@@ -217,7 +238,12 @@ int establish_receive_connection() {
 	if (p == NULL) {
 		fprintf(stderr, "listener: failed to bind socket\n");
 		return 2;
-	}
+	}	
+	
+	sender_info = malloc(sizeof *p);
+	
+	*sender_info = *p;
+
 	freeaddrinfo(servinfo);
 	//printf("listener: waiting to recvfrom...\n");
 	return sockfd;
@@ -228,8 +254,9 @@ int establisb_send_connection(char* hostname) {
 	int rv;
 	struct addrinfo hints, *servinfo, *p;
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
 
 	if ((rv = getaddrinfo(hostname, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
@@ -251,10 +278,18 @@ int establisb_send_connection(char* hostname) {
 		fprintf(stderr, "talker: failed to bind socket\n");
 		return 2;
 	}
+	
+	receiver_info = malloc(sizeof *p);
+	
+	*receiver_info = *p;
+	
+	freeaddrinfo(servinfo);
+	
 	return sockfd;
 }
 
 void sendPacket(char* packet) {
+
 	char buffer[PACKET_SIZE + 1];
 	int seq;
 	int size;
@@ -262,13 +297,25 @@ void sendPacket(char* packet) {
 	memcpy(&size, packet + sizeof(int), sizeof(int));
 	memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
 	buffer[PACKET_SIZE] = '\0';
-	printf("Packet %d with size %d to send is : %s \n", seq, size, buffer);
-//	int numbytes;
-//	if ((numbytes = sendto(send_socket, packet, PACKET_SIZE, 0, p->ai_addr,
-//			p->ai_addrlen)) == -1) {
-//		perror("packet send:");
-//		exit(1);
-//	}
+	
+	struct reliable_dgram dgram;
+	
+	dgram.seq = seq;
+	dgram.size = size;
+	memcpy(dgram.payload, buffer, PACKET_SIZE);
+	
+	int numbytes;
+
+    if (receiver_info){
+            
+	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
+	            receiver_info->ai_addr, 
+	                receiver_info->ai_addrlen )) == -1) {
+	                
+		    perror("packet send:");
+		    exit(1);
+	    }
+	}
 }
 
 void *listen_for_ack(void* data) {
@@ -278,14 +325,20 @@ void *listen_for_ack(void* data) {
 	socklen_t addr_len = sizeof their_addr;
 	while (1) {
 		int numbytes;
-		char buf[INT_SIZE];
-		if ((numbytes = recvfrom(receive_socket, buf, INT_SIZE - 1, 0,
+		char buf[PACKET_SIZE];
+		if ((numbytes = recvfrom(receive_socket, buf, PACKET_SIZE - 1, 0,
 				(struct sockaddr *) &their_addr, &addr_len)) == -1) {
 			perror("ack recv");
 			exit(1);
 		}
-		int ack_seq;
-		memcpy(&ack_seq, buf, INT_SIZE);
-		ack_packet(ack_seq);
+		
+		//int ack_seq;
+
+		reliable_dgram *dgram = (reliable_dgram *)buf;
+		
+		//memcpy(&ack_seq, buf, INT_SIZE);
+		//ack_packet(ack_seq);
+		printf("reliable_sender: received ack for packet seq #%d\n", dgram->seq);
+		ack_packet(dgram->seq);
 	}
 }
