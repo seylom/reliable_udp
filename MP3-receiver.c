@@ -15,31 +15,37 @@
 #include "helper.h"
 
 #define MAXBUFLEN 1500
+#define WINDOW_SIZE 10
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile);
 void sigchld_handler(int s);
 int establish_receive_connection();
 int establisb_send_connection(char* hostname);
 void send_dgram(char *host, char *port, reliable_dgram *dgram);
-void write_to_file(char* data);
+void process_packet(struct reliable_dgram* dgram);
+void write_to_file();
 void initialize_window();
 void *packet_handler(void *datapv);
+int map_seq_to_window(int seq);
 
 struct sockaddr_storage their_addr;
 char destination[256];
-
-typedef struct window_slot{
-     int ack;
-     int written;
-     int received;
-};
 
 typedef struct packet_info{
     char* hostname;
     struct reliable_dgram *datagram;
 };
 
-struct window_slot window[5];
+typedef struct window_slot{
+     int ack;
+     int written;
+     int received;
+     int seq;
+     
+     char *data;
+};
+
+struct window_slot window[WINDOW_SIZE];
 
 /* Global variable storing current port in use */
 char port[6];
@@ -49,8 +55,25 @@ struct addrinfo *client_info;
 FILE *file;
 pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t window_lock = PTHREAD_MUTEX_INITIALIZER;
-int window_start = 0;
+int next_slot = 0;
 int max_window_slots = 5;
+int next_expected_packet;
+
+int window_start = 0;
+int current_seq = 0;
+int next_non_written = 0;
+
+/* Maps the actual sequence number to a index in sliding window */
+int map_seq_to_window(int seq) {
+	int index = seq % WINDOW_SIZE;
+	return index;
+}
+
+int window_has_room() {
+	if (window_start + WINDOW_SIZE > current_seq)
+		return 1;
+	return 0;
+}
 
 int main(int argc, char** argv) {
 	unsigned short int udpPort;
@@ -79,6 +102,7 @@ void initialize_window(){
         window[i].ack = 0;
         window[i].written = 0;
         window[i].received = 0;   
+        window[i].seq = 0;
     }
 }
 
@@ -164,7 +188,8 @@ void *packet_handler(void *datapv){
 	
 	dgram->payload[DATA_SIZE] = 0;
 	
-	write_to_file(dgram->payload);
+	process_packet(dgram);
+	write_to_file();
 	
 	//free packet here.
 }
@@ -182,15 +207,60 @@ void sendAck(char* hostName, int seq) {
 }
 
 /*
+*   store packet int the window
+*/
+void process_packet(struct reliable_dgram *dgram){
+
+    pthread_mutex_lock(&window_lock);
+    
+    //store packet in window
+    int slot = map_seq_to_window(dgram->seq);
+    
+    if (window[slot].received == 0){
+        window[slot].received = 1;
+        window[slot].ack = 1;
+        window[slot].seq = dgram->seq;
+        
+        window[slot].data = malloc(sizeof(dgram->payload));
+        memcpy(window[slot].data, dgram->payload, strlen(dgram->payload));
+    }
+    
+    pthread_mutex_unlock(&window_lock);
+}
+
+/*
 *Writes the provided data to the destination file
 */
-void write_to_file(char *data){
+void write_to_file(){
 
     pthread_mutex_lock(&file_lock);
-
-    file = fopen(destination,"w+");  
-    fputs(data, file);
-    fclose(file);
+    
+    int i = 0;
+    int written_count = 0;
+    
+    //only write if we have packets in the correct order
+    for(i = next_non_written; i < WINDOW_SIZE; i++){
+        if (window[i].received == 0)
+            break;
+            
+        if (window[i].received == 1 && window[i].written == 0){
+        
+            printf("reliable_receiver: writting seq#%d to file\n", window[i].seq);
+            
+            file = fopen(destination,"a");  
+            fputs(window[i].data, file);
+            fclose(file);
+            
+            window[i].received = 0;
+            free(window[i].data);
+            window[i].data = NULL;
+            
+            written_count++;
+        }
+    }
+    
+    //mark the index in the sliding window of what we need to write next
+    next_non_written += written_count;
     
     pthread_mutex_unlock(&file_lock);
 }

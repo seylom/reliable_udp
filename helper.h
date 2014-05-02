@@ -20,4 +20,5 @@ typedef struct reliable_dgram{
     int size;   //the size of the payload
     int window_size;    //set by the server to advertize its window size
     char payload[DATA_SIZE];    //the actual data.
+    int next_seq; //set to the next expected sequence; -1 indicate no more sequence.
 }reliable_dgram;

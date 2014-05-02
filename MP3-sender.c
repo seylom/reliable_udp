@@ -342,6 +342,7 @@ void sendPacket(char* packet) {
 	
 	dgram.seq = seq;
 	dgram.size = size;
+	dgram.next_seq = seq + 1;
 	memcpy(dgram.payload, buffer, PACKET_SIZE);
 	
 	int numbytes;
