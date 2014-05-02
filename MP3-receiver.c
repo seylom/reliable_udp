@@ -23,6 +23,7 @@ int establisb_send_connection(char* hostname);
 void send_dgram(char *host, char *port, reliable_dgram *dgram);
 void write_to_file(char* data);
 void initialize_window();
+void *packet_handler(void *datapv);
 
 struct sockaddr_storage their_addr;
 char destination[256];
@@ -31,6 +32,11 @@ typedef struct window_slot{
      int ack;
      int written;
      int received;
+};
+
+typedef struct packet_info{
+    char* hostname;
+    struct reliable_dgram *datagram;
 };
 
 struct window_slot window[5];
@@ -123,23 +129,44 @@ void receivePacket(int sockfd) {
 		exit(1);
 	}
 	
-	reliable_dgram *dgram = (reliable_dgram *)buf;
-	
 	char* sender_host = inet_ntop(their_addr.ss_family,
 			get_in_addr((struct sockaddr *) &their_addr), s, sizeof s);
+	
+	reliable_dgram *dgram = (reliable_dgram *)buf;
 	
 	//printf("reliable_receiver: got packet from %s\n", sender_host);
 	//printf("reliable_receiver: received dgram with seq #%d, size %d\n", dgram->seq, dgram->size);
 	//printf("reliable_receiver: packet is %d bytes long\n", numbytes);
 	
 	//buf[numbytes] = '\0';
+	
+	struct packet_info *packet;
+	packet = malloc(sizeof(struct packet_info));
+	
+	packet->hostname = malloc(256);
+	memcpy(packet->hostname, sender_host, strlen(sender_host));
+	packet->hostname[strlen(sender_host)] = 0;
+	
+	packet->datagram = malloc(sizeof(*dgram));
+	*(packet->datagram) = *dgram;
+	
+	pthread_t thread;
+	pthread_create(&thread, NULL, (void*)packet_handler, (void*)packet);
+}
+
+void *packet_handler(void *datapv){
+   
+    struct packet_info *packet =  (struct packet_info *)datapv;
  
-	sendAck(sender_host, dgram->seq);
+    reliable_dgram *dgram = packet->datagram;
+    
+	sendAck(packet->hostname, dgram->seq);
 	
 	dgram->payload[DATA_SIZE] = 0;
 	
 	write_to_file(dgram->payload);
 	
+	//free packet here.
 }
 
 void sendAck(char* hostName, int seq) {
