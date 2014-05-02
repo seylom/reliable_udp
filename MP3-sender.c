@@ -19,7 +19,8 @@
 #define PACKET_SIZE 1472
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
-#define TIMEOUT 2
+#define TIMEOUT 1
+#define DATA_SIZE (PACKET_SIZE - HEADER_SIZE)
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
 		char* filename, unsigned long long int bytesToTransfer);
@@ -37,6 +38,7 @@ int send_socket;
 int receive_socket;
 int current_seq = 0;
 int window_start = -1;
+int num_bytes_sent = 0;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -53,6 +55,7 @@ struct SlidingWindow {
 	time_t time_sent;
 	int ack;
 	char* data;
+	size_t size;
 };
 struct SlidingWindow window[WINDOW_SIZE];
 
@@ -69,6 +72,7 @@ void init(char* filename, int udpPort) {
 		window[i].seq = 0;
 		window[i].time_sent = 0;
 		window[i].data = NULL;
+		window[i].size = 0;
 	}
 	// Open file and keep the handle
 	fp = fopen(filename, "r");
@@ -108,48 +112,77 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
 
     int notified_completed = 0;
+    int expected_ack;
+    int read_bytes;
+    
+    printf("Max number of bytes to send: %d\n", numBytes);
     
 	/* Loop through the file content and send packets to fill a window */
 	while (1) {
+	    
+	    
 		// Sending next packet if there is room in sliding window
-		if (feof(fp)) {
+		if (feof(fp) || read_bytes >= numBytes) {
 			
 			if (notified_completed == 0){
-			    //notified_completed = 1;
-			    printf("file is sent completely\n");
+			    notified_completed = 1;
+			    printf("All file blocks were fully added to the window.\n");
+			}
+			else{
+			    if (expected_ack == 0){
+			        printf("File successfully transferred!\n");
+			        break;
+			    }
 			}
 			
 			sleep(2);
 			//TODO: check if all packets are acked successfully then exit.
-		} else if (window_has_room()) {
-			pthread_mutex_lock(&lock);
-			char* packet = calloc(PACKET_SIZE + HEADER_SIZE, 1);
-			char* data_block = malloc(PACKET_SIZE - HEADER_SIZE);
-			size_t content_size = fread(data_block, 1,
-					PACKET_SIZE - HEADER_SIZE, fp);
+		} else{
+		    if (window_has_room()) {
+			    pthread_mutex_lock(&lock);
+			    
+			    int actual_data_size = 0;
+			    
+			    if(numBytes - read_bytes < DATA_SIZE){
+			        actual_data_size = numBytes - read_bytes;
+			    }
+			    else{
+			        actual_data_size = DATA_SIZE;
+			    }
+			        
+			    char* packet = calloc(PACKET_SIZE + HEADER_SIZE, 1);
+			    char* data_block = malloc(DATA_SIZE);
+			    size_t content_size = fread(data_block, 1, actual_data_size, fp);
 
-			/* Copy sequence number  to packet */
-			memcpy(packet, &current_seq, INT_SIZE);
+                read_bytes += content_size;
+                
+			    /* Copy sequence number  to packet */
+			    memcpy(packet, &current_seq, INT_SIZE);
 
-			/* Copy payload size to packet */
-			memcpy(packet + INT_SIZE, &content_size, INT_SIZE);
+			    /* Copy payload size to packet */
+			    memcpy(packet + INT_SIZE, &content_size, INT_SIZE);
 
-			/* Copy payload to packet */
-			memcpy(packet + HEADER_SIZE, data_block, PACKET_SIZE - HEADER_SIZE);
+			    /* Copy payload to packet */
+			    memcpy(packet + HEADER_SIZE, data_block, DATA_SIZE);
 
-			/* Create a window entry */
-			int index = map_seq_to_window(current_seq);
-			window[index].seq = current_seq;
-			window[index].data = packet;
-			window[index].ack = 0;
-			window[index].time_sent = (int) time(NULL);
-			
-			sendPacket(packet);
-			current_seq++;
-			pthread_mutex_unlock(&lock);
-		} else {
-			printf("Window is full\n");
-			sleep(2);
+			    /* Create a window entry */
+			    int index = map_seq_to_window(current_seq);
+			    window[index].seq = current_seq;
+			    window[index].data = packet;
+			    window[index].ack = 0;
+			    window[index].time_sent = (int) time(NULL);
+			    window[index].size = actual_data_size;
+			    
+			    printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n", current_seq, content_size,read_bytes, numBytes);
+			    
+			    sendPacket(packet);
+			    current_seq++;
+			    
+			    pthread_mutex_unlock(&lock);
+		    } else {
+			    printf("Window is full\n");
+			    sleep(2);
+		    }
 		}
 		// check sent packets and re-send timed out ones
 		
@@ -162,13 +195,14 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    
 				printf("packet %d is timed out.\n", entry.seq);
 				entry.time_sent = (int) time(NULL);
+				
+				printf("reliable_sender: Re-sending seq #%d of payload size %d\n", entry.seq, entry.size);
+				
 				sendPacket(entry.data);
 				
 				expected_ack++;
 			}
 		}
-		
-		printf("Number of expected ACK %d\n",  expected_ack);
 	}
 }
 
@@ -193,13 +227,19 @@ void ack_packet(int seq) {
 	struct SlidingWindow entry = window[index];
 	window[index].ack = 1;
 	window[index].seq = 0;
+	
+	int data_size = strlen(window[index].data);
+	
 	free(window[index].data);
 	window[index].data = NULL;
 
 	// Slide window as more packets get ack
 	while (window[map_seq_to_window(window_start + 1)].ack) {
 		window_start++;
+		
+		num_bytes_sent += data_size;
 	}
+    
 	pthread_mutex_unlock(&lock);
 }
 
@@ -307,7 +347,7 @@ void sendPacket(char* packet) {
 	int numbytes;
 
     if (receiver_info){
-            
+         
 	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
 	            receiver_info->ai_addr, 
 	                receiver_info->ai_addrlen )) == -1) {

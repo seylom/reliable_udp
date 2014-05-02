@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <pthread.h>
 
 #include "helper.h"
 
@@ -20,14 +21,30 @@ void sigchld_handler(int s);
 int establish_receive_connection();
 int establisb_send_connection(char* hostname);
 void send_dgram(char *host, char *port, reliable_dgram *dgram);
+void write_to_file(char* data);
+void initialize_window();
 
 struct sockaddr_storage their_addr;
+char destination[256];
+
+typedef struct window_slot{
+     int ack;
+     int written;
+     int received;
+};
+
+struct window_slot window[5];
 
 /* Global variable storing current port in use */
 char port[6];
 int socket_back_to_sender = -1;
 char send_port[6] ;
 struct addrinfo *client_info;
+FILE *file;
+pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t window_lock = PTHREAD_MUTEX_INITIALIZER;
+int window_start = 0;
+int max_window_slots = 5;
 
 int main(int argc, char** argv) {
 	unsigned short int udpPort;
@@ -39,9 +56,24 @@ int main(int argc, char** argv) {
 	udpPort = (unsigned short int) atoi(argv[1]);
 	sprintf(port, "%d", udpPort);
 	sprintf(send_port, "%d", udpPort + 5);
+	
+	initialize_window();
 
 	reliablyReceive(udpPort, argv[2]);
+	
 	return 0;
+}
+
+/*
+*   Initializes receiving window information
+*/
+void initialize_window(){
+    int i = 0;
+    for(i=0; i< max_window_slots; i++){
+        window[i].ack = 0;
+        window[i].written = 0;
+        window[i].received = 0;   
+    }
 }
 
 // get sockaddr, IPv4 or IPv6:
@@ -54,6 +86,24 @@ void *get_in_addr(struct sockaddr *sa) {
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
+    if (access(destinationFile, F_OK) != -1){
+        if (remove(destinationFile) == 0){
+            //printf("reliable_receiver: existing destination file removed\n");
+        }
+    }
+    
+    file = fopen(destinationFile, "w");
+    
+    if (file == NULL){
+        printf("reliable_receiver: Unable to create the destination file\n");
+        exit(1);
+    }
+    
+    fclose(file);
+    
+    memcpy(destination, destinationFile, strlen(destinationFile));
+    destination[strlen(destinationFile)] = 0;
+    
 	int sockfd = establish_receive_connection();
 	
 	while (1) {
@@ -82,10 +132,14 @@ void receivePacket(int sockfd) {
 	//printf("reliable_receiver: received dgram with seq #%d, size %d\n", dgram->seq, dgram->size);
 	//printf("reliable_receiver: packet is %d bytes long\n", numbytes);
 	
-	buf[numbytes] = '\0';
-	
-	//send ack for packet
+	//buf[numbytes] = '\0';
+ 
 	sendAck(sender_host, dgram->seq);
+	
+	dgram->payload[DATA_SIZE] = 0;
+	
+	write_to_file(dgram->payload);
+	
 }
 
 void sendAck(char* hostName, int seq) {
@@ -98,6 +152,20 @@ void sendAck(char* hostName, int seq) {
     
     printf("reliable_receiver: Sending ACK for seq #%d\n", seq);
     send_dgram(hostName, send_port, &dgram);
+}
+
+/*
+*Writes the provided data to the destination file
+*/
+void write_to_file(char *data){
+
+    pthread_mutex_lock(&file_lock);
+
+    file = fopen(destination,"w+");  
+    fputs(data, file);
+    fclose(file);
+    
+    pthread_mutex_unlock(&file_lock);
 }
 
 int establish_receive_connection() {
