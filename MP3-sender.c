@@ -15,7 +15,7 @@
 
 #include "helper.h"
 
-#define WINDOW_SIZE 40
+#define WINDOW_SIZE 5
 #define PACKET_SIZE 1472
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
@@ -110,6 +110,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	/* Start listening for ack */
 	pthread_t thread;
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
+	sleep(1);
 
     int notified_completed = 0;
     int expected_ack = 0;
@@ -119,11 +120,8 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
     
 	/* Loop through the file content and send packets to fill a window */
 	while (1) {
-	    
-	    
 		// Sending next packet if there is room in sliding window
 		if (feof(fp) || read_bytes >= numBytes) {
-			
 			if (notified_completed == 0){
 			    notified_completed = 1;
 			    printf("All file blocks were fully added to the window.\n");
@@ -151,7 +149,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    }
 			        
 			    char* packet = calloc(PACKET_SIZE + HEADER_SIZE, 1);
-			    char* data_block = malloc(DATA_SIZE);
+			    char* data_block = malloc(actual_data_size);
 			    size_t content_size = fread(data_block, 1, actual_data_size, fp);
 
                 read_bytes += content_size;
@@ -188,7 +186,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 		
 		int expected_ack = 0;
 		
-		int i = 0;
+		/*int i = 0;
 		for (i = 0; i < WINDOW_SIZE; i++) {
 			struct SlidingWindow entry = window[i];
 			if (entry.data && is_window_entry_timedout(i)) {
@@ -202,7 +200,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 				
 				expected_ack++;
 			}
-		}
+		} */
 	}
 }
 
@@ -228,16 +226,19 @@ void ack_packet(int seq) {
 	window[index].ack = 1;
 	window[index].seq = 0;
 	
-	int data_size = strlen(window[index].data);
+	int data_size = window[index].size;
+	num_bytes_sent += data_size;
 	
 	free(window[index].data);
 	window[index].data = NULL;
 
 	// Slide window as more packets get ack
-	while (window[map_seq_to_window(window_start + 1)].ack) {
+	int slide_value = 0;
+	while (window[map_seq_to_window(window_start + 1)].ack && slide_value < WINDOW_SIZE-1) {
+		slide_value++;
 		window_start++;
-		
-		num_bytes_sent += data_size;
+		window[map_seq_to_window(window_start)].ack = 0; // reseting ack
+		printf("window start for seq# %d is set to %d\n", seq, window_start);
 	}
     
 	pthread_mutex_unlock(&lock);
@@ -329,7 +330,6 @@ int establisb_send_connection(char* hostname) {
 }
 
 void sendPacket(char* packet) {
-
 	char buffer[PACKET_SIZE + 1];
 	int seq;
 	int size;
@@ -348,7 +348,6 @@ void sendPacket(char* packet) {
 	int numbytes;
 
     if (receiver_info){
-         
 	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
 	            receiver_info->ai_addr, 
 	                receiver_info->ai_addrlen )) == -1) {
