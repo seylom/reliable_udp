@@ -112,8 +112,8 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
 
     int notified_completed = 0;
-    int expected_ack;
-    int read_bytes;
+    int expected_ack = 0;
+    int read_bytes = 0;
     
     printf("Max number of bytes to send: %d\n", numBytes);
     
