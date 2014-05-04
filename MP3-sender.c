@@ -16,7 +16,7 @@
 #include "helper.h"
 
 #define WINDOW_SIZE 100
-#define PACKET_SIZE 1472
+#define PACKET_SIZE 1470
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
 #define TIMEOUT 2
