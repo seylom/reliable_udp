@@ -24,7 +24,7 @@
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
 		char* filename, unsigned long long int bytesToTransfer);
-void sendPacket(char* packet);
+void sendPacket(char* packet, char* hostName);
 int establisb_send_connection(char* host);
 int establish_receive_connection();
 int is_window_entry_timedout(int index);
@@ -106,7 +106,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	init(fileName, udpPort);
 
 	/* Opens the connection for sending packets */
-	send_socket = establisb_send_connection(hostName);
+	//send_socket = establisb_send_connection(hostName);
 
 	/* Start listening for ack */
 	pthread_t thread;
@@ -171,7 +171,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    
 			    printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n", current_seq, strlen(data_block),read_bytes, numBytes);
 			    
-			    sendPacket(packet);
+			    sendPacket(packet, hostName);
 			    current_seq++;
 			    
 			    pthread_mutex_unlock(&lock);
@@ -195,7 +195,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 				
 				printf("reliable_sender: Re-sending seq #%d of payload size %d\n", entry.seq, entry.size);
 				
-				sendPacket(entry.data);
+				sendPacket(entry.data, hostName);
 				
 				expected_ack++;
 			}
@@ -308,6 +308,49 @@ int establish_receive_connection() {
 }
 
 int establisb_send_connection(char* hostname) {
+/*	int sockfd;*/
+/*	int rv;*/
+/*	struct addrinfo hints, *servinfo, *p;*/
+/*	memset(&hints, 0, sizeof hints);*/
+/*    hints.ai_family = AF_INET;*/
+/*    hints.ai_socktype = SOCK_DGRAM;*/
+/*    hints.ai_flags = AI_PASSIVE;*/
+
+/*	if ((rv = getaddrinfo(hostname, port, &hints, &servinfo)) != 0) {*/
+/*		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));*/
+/*		return 1;*/
+/*	}*/
+
+/*	// loop through all the results and make a socket*/
+/*	for (p = servinfo; p != NULL; p = p->ai_next) {*/
+/*		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol))*/
+/*				== -1) {*/
+/*			perror("talker: socket");*/
+/*			continue;*/
+/*		}*/
+
+/*		break;*/
+/*	}*/
+
+/*	if (p == NULL) {*/
+/*		fprintf(stderr, "talker: failed to bind socket\n");*/
+/*		return 2;*/
+/*	}*/
+/*	*/
+/*	receiver_info = malloc(sizeof *p);*/
+/*	*/
+/*	*receiver_info = *p;*/
+/*	*/
+/*	freeaddrinfo(servinfo);*/
+/*	*/
+/*	return sockfd;*/
+}
+
+void sendPacket(char* packet, char *hostname) {
+	char buffer[PACKET_SIZE + 1];
+	int seq;
+	int size;
+	
 	int sockfd;
 	int rv;
 	struct addrinfo hints, *servinfo, *p;
@@ -325,7 +368,7 @@ int establisb_send_connection(char* hostname) {
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol))
 				== -1) {
-			perror("talker: socket");
+			perror("reliable_sender: socket");
 			continue;
 		}
 
@@ -333,23 +376,10 @@ int establisb_send_connection(char* hostname) {
 	}
 
 	if (p == NULL) {
-		fprintf(stderr, "talker: failed to bind socket\n");
+		fprintf(stderr, "reliable_sender: failed to bind socket\n");
 		return 2;
 	}
 	
-	receiver_info = malloc(sizeof *p);
-	
-	*receiver_info = *p;
-	
-	freeaddrinfo(servinfo);
-	
-	return sockfd;
-}
-
-void sendPacket(char* packet) {
-	char buffer[PACKET_SIZE + 1];
-	int seq;
-	int size;
 	memcpy(&seq, packet, sizeof(int));
 	memcpy(&size, packet + sizeof(int), sizeof(int));
 	memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
@@ -364,15 +394,14 @@ void sendPacket(char* packet) {
 	
 	int numbytes;
 
-    if (receiver_info){
-	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
-	            receiver_info->ai_addr, 
-	                receiver_info->ai_addrlen )) == -1) {
+    if ((numbytes = sendto(sockfd, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
+	            p->ai_addr, p->ai_addrlen )) == -1) {
 	                
 		    perror("packet send:");
 		    exit(1);
-	    }
 	}
+	
+	close(sockfd);
 }
 
 void *listen_for_ack(void* data) {
