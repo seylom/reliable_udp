@@ -15,11 +15,11 @@
 
 #include "helper.h"
 
-#define WINDOW_SIZE 100
-#define PACKET_SIZE 1470
+#define WINDOW_SIZE 5000
+#define PACKET_SIZE 9000
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
-#define TIMEOUT 2
+#define TIMEOUT 3
 #define DATA_SIZE (PACKET_SIZE - HEADER_SIZE)
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
@@ -77,6 +77,12 @@ void init(char* filename, int udpPort) {
 	}
 	// Open file and keep the handle
 	fp = fopen(filename, "r");
+	
+	if(fp == NULL){
+	    fprintf(stderr, "reliable_sender: Unable to open file for reading\n");
+	    return;
+	}
+	    
 
 	// Convert port to string
 	sprintf(port, "%d", udpPort);
@@ -130,7 +136,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			}
 			
 			//sleep(2);
-			usleep(100000);
+			//usleep(100000);
 			//TODO: check if all packets are acked successfully then exit.
 		} else{
 		    if (window_has_room()) {
@@ -176,9 +182,10 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    
 			    pthread_mutex_unlock(&lock);
 		    } else {
+		        //fprintf(stderr, "reliable_sender: Window has no room : window_start is %d and current_seq is %d\n", window_start, current_seq);
 			    printf("Window is full\n");
 			    //sleep(2);
-				usleep(100000);
+				//usleep(100000);
 		    }
 		}
 		// check sent packets and re-send timed out ones
@@ -201,11 +208,14 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			}
 		}
 		
-		if (total_ack_bytes == numBytes){
+		if (num_bytes_sent == numBytes){
 		    printf("File successfully transferred!\n");
 		    break;
 		}
 	}
+	
+	close(sender_info);
+	close(receiver_info);
 }
 
 int is_window_entry_timedout(int index) {
@@ -225,6 +235,8 @@ int window_has_room() {
 
 void ack_packet(int seq, int receiver_window) {
 	pthread_mutex_lock(&lock);
+	
+	//fprintf(stderr, "reliable_sender: Received ACK for seq #%d\n", seq);
 
 	int index = map_seq_to_window(seq);
 	
@@ -379,6 +391,9 @@ void sendPacket(char* packet) {
 		    perror("packet send:");
 		    exit(1);
 	    }
+	}
+	else{
+	    fprintf(stderr, "Unable to send to the specified receiver: receiver info is %d\n", receiver_info);
 	}
 }
 

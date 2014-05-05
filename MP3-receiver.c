@@ -14,8 +14,8 @@
 
 #include "helper.h"
 
-#define MAXBUFLEN 1500
-#define WINDOW_SIZE 200
+#define MAXBUFLEN 9028
+#define WINDOW_SIZE 10000
 
 typedef struct packet_info{
     char* hostname;
@@ -121,13 +121,13 @@ void *get_in_addr(struct sockaddr *sa) {
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
-    if (access(destinationFile, F_OK) != -1){
-        if (remove(destinationFile) == 0){
-            //printf("reliable_receiver: existing destination file removed\n");
-        }
-    }
+/*    if (access(destinationFile, F_OK) != -1){*/
+/*        if (remove(destinationFile) == 0){*/
+/*            //printf("reliable_receiver: existing destination file removed\n");*/
+/*        }*/
+/*    }*/
     
-    file = fopen(destinationFile, "a");
+    file = fopen(destinationFile, "w");
     
     if (file == NULL){
         printf("reliable_receiver: Unable to create the destination file\n");
@@ -152,11 +152,11 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 void *write_handler(void *datapv){
 
 	while(1){
-		pthread_mutex_lock(&window_lock);	
+		//pthread_mutex_lock(&window_lock);	
 		write_to_file();	
-		pthread_mutex_unlock(&window_lock);
+		//pthread_mutex_unlock(&window_lock);
 		
-		usleep(100000);
+		//usleep(100000);
 	}
 }
 
@@ -169,6 +169,7 @@ void receivePacket(int sockfd) {
 	if ((numbytes = recvfrom(sockfd, buf, MAXBUFLEN - 1, 0,
 			(struct sockaddr *) &their_addr, &addr_len)) == -1) {
 		perror("recvfrom");
+		fprintf(stderr, "reliable_receiver: read 0 bytes from sender\n");
 		exit(1);
 	}
 	
@@ -186,6 +187,8 @@ void receivePacket(int sockfd) {
 	
 	packet->datagram = malloc(sizeof(*dgram));
 	*(packet->datagram) = *dgram;
+	
+	fprintf(stderr, "Received packet with sequece %d\n", dgram->seq);
 	
 	//pthread_t thread;
 	//pthread_create(&thread, NULL, (void*)packet_handler, (void*)packet);
@@ -254,6 +257,8 @@ void process_packet(struct packet_info *packet){
 		printf("reliable_receiver: Attempt to override packet not yet consumed\n");
 		return;
 	}
+	
+	fprintf(stderr, "reliable_receiver: Packet with sequence #%d processed into window\n", dgram->seq);
 
 	window[slot].received = 1;
 	window[slot].written = 0;
@@ -277,7 +282,7 @@ void process_packet(struct packet_info *packet){
 */
 void write_to_file(){
 
-    //pthread_mutex_lock(&file_lock);
+    pthread_mutex_lock(&file_lock);
     
     int i = 0;
     int written_count = 0;
@@ -332,16 +337,17 @@ void write_to_file(){
     //wrap it around
     next_non_written = map_seq_to_window(next_non_written);
  
-    //pthread_mutex_unlock(&file_lock);
+    pthread_mutex_unlock(&file_lock);
 }
 
 int establish_receive_connection() {
 	int sockfd;
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
+	int yes = 1;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC; // set to AF_INET to force IPv4
+	hints.ai_family = AF_INET; // set to AF_INET to force IPv4
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE; // use my IP
 
@@ -357,6 +363,12 @@ int establish_receive_connection() {
 			perror("reliable_receiver: socket");
 			continue;
 		}
+		
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(1);
+        }
 
 		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			close(sockfd);
@@ -379,9 +391,10 @@ int establish_receive_connection() {
 int establish_send_connection(char* hostname) {
 	int sockfd;
 	int rv;
+	int yes = 1;
 	struct addrinfo hints, *servinfo, *p;
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_DGRAM;
 
 	if ((rv = getaddrinfo(hostname, send_port, &hints, &servinfo)) != 0) {
@@ -396,6 +409,12 @@ int establish_send_connection(char* hostname) {
 			perror("reliable_receiver: socket");
 			continue;
 		}
+		
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(1);
+        }
 
 		break;
 	}
@@ -423,6 +442,7 @@ void send_dgram(char *host, char *port, reliable_dgram *dgram){
     struct addrinfo hints, *servinfo, *p;
     int rv;
     int numbytes;
+    int yes = 1;
 
     //char *message = (char*)dgram;
     
@@ -442,6 +462,12 @@ void send_dgram(char *host, char *port, reliable_dgram *dgram){
                 p->ai_protocol)) == -1) {
             perror("node: socket");
             continue;
+        }
+        
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(1);
         }
 
         break;
