@@ -15,7 +15,7 @@
 #include "helper.h"
 
 #define MAXBUFLEN 1500
-#define WINDOW_SIZE 10000
+#define WINDOW_SIZE 1000
 
 typedef struct packet_info{
     char* hostname;
@@ -28,9 +28,9 @@ int establish_receive_connection();
 int establisb_send_connection(char* hostname);
 void send_dgram(char *host, char *port, reliable_dgram *dgram);
 void process_packet(struct packet_info *packet);
-void write_to_file();
+int write_to_file();
 void initialize_window();
-void *packet_handler(void *datapv);
+int packet_handler(void *datapv);
 int map_seq_to_window(int seq);
 void *write_handler(void *datapv);
 
@@ -42,8 +42,10 @@ typedef struct window_slot{
      int written;
      int received;
      int seq;
+     int next_seq;
+     int size;
      
-     char *data;
+     unsigned char *data;
 	 char *hostname;
 };
 
@@ -64,6 +66,7 @@ int next_expected_packet;
 volatile int window_start = 0;
 int current_seq = 0;
 int next_non_written = 0;
+int volatile completed = 0;
 
 /* Maps the actual sequence number to a index in sliding window */
 int map_seq_to_window(int seq) {
@@ -106,6 +109,8 @@ void initialize_window(){
         window[i].written = 0;
         window[i].received = 0;   
         window[i].seq = 0;
+        window[i].next_seq = 0;
+        window[i].size = 0;
     }
     
     available_slots = WINDOW_SIZE;
@@ -141,11 +146,13 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     
 	int sockfd = establish_receive_connection();
 	
-	pthread_t thread;
-	pthread_create(&thread, NULL, (void*)write_handler,(void*)NULL);
+	//pthread_t thread;
+	//pthread_create(&thread, NULL, (void*)write_handler,(void*)NULL);
 	
-	while (1) {
-		receivePacket(sockfd);
+	int done = 0;
+	
+	while (!done) {
+		done = receivePacket(sockfd);
 	}
 }
 
@@ -160,7 +167,7 @@ void *write_handler(void *datapv){
 	}
 }
 
-void receivePacket(int sockfd) {
+int receivePacket(int sockfd) {
 	int numbytes;
 	char buf[MAXBUFLEN];
 	char s[INET6_ADDRSTRLEN];
@@ -188,25 +195,38 @@ void receivePacket(int sockfd) {
 	packet->datagram = malloc(sizeof(*dgram));
 	*(packet->datagram) = *dgram;
 	
-	fprintf(stderr, "Received packet with sequece %d\n", dgram->seq);
+	//fprintf(stderr, "Received packet with sequece %d\n", dgram->seq);
 	
 	//pthread_t thread;
-	//pthread_create(&thread, NULL, (void*)packet_handler, (void*)packet);
+    //pthread_create(&thread, NULL, (void*)packet_handler, (void*)packet);
 	
 	//printf("Thread id: %u\n", thread);
 	
-	packet_handler((void*)packet);
+	if(dgram->seq == -1)
+	   return 1;
+	   
+	if(completed){
+	    sendAck(packet->hostname, dgram->seq, -1);
+	    return 1;   
+    }
 	
+	printf("Packet with seq #%d received\n", dgram->seq);
+	
+	int done = packet_handler((void*)packet);
+	
+	return 0;
 }
 
-void *packet_handler(void *datapv){
+int packet_handler(void *datapv){
 	
     struct packet_info *packet =  (struct packet_info *)datapv;
  
     reliable_dgram *dgram = packet->datagram;
     
+    int done = 0;
+    
     pthread_mutex_lock(&window_lock);
-     
+    
     if (available_slots > 0){ 
         
 		if (dgram->seq > (window_start + WINDOW_SIZE)){
@@ -216,17 +236,19 @@ void *packet_handler(void *datapv){
 	
         available_slots--;
         
-	    dgram->payload[DATA_SIZE] = 0;
+	    //dgram->payload[dgram->size] = 0;
 	
 	    process_packet(packet);
 	
-	    //write_to_file();
+	    done = write_to_file();
 	}
 	else{
-		printf("Dropping packet seq #%d\n", dgram->seq);
+		//printf("Dropping packet seq #%d\n", dgram->seq);
 	}
 	
 	pthread_mutex_unlock(&window_lock);
+	
+	return done;
 }
 
 void sendAck(char* hostName, int seq, int slots) {
@@ -235,7 +257,14 @@ void sendAck(char* hostName, int seq, int slots) {
     
     dgram.seq = seq;
     dgram.size = 3*sizeof(char);
-	dgram.window_size = slots;
+    
+    if (slots > -1){
+	    dgram.window_size = slots;
+	}
+	else{
+	    dgram.ack_fin = 1;
+	    dgram.window_size =  0;
+	}
 	
     memcpy(dgram.payload,"ACK",dgram.size);
     
@@ -258,12 +287,14 @@ void process_packet(struct packet_info *packet){
 		return;
 	}
 	
-	fprintf(stderr, "reliable_receiver: Packet with sequence #%d processed into window\n", dgram->seq);
+	//fprintf(stderr, "reliable_receiver: Packet with sequence #%d processed into window\n", dgram->seq, dgram->next_seq);
 
 	window[slot].received = 1;
 	window[slot].written = 0;
 	window[slot].ack = 0;
 	window[slot].seq = dgram->seq;
+	window[slot].next_seq = dgram->next_seq;
+	window[slot].size = dgram->size;
 	
 	window[slot].data = malloc(sizeof(char)*strlen(dgram->payload));
 	memcpy(window[slot].data, dgram->payload, strlen(dgram->payload));
@@ -280,7 +311,7 @@ void process_packet(struct packet_info *packet){
 /*
 *Writes the provided data to the destination file
 */
-void write_to_file(){
+int write_to_file(){
 
     pthread_mutex_lock(&file_lock);
     
@@ -304,16 +335,23 @@ void write_to_file(){
 		if (window[idx].received == 0)
 			break;
             
-		printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, strlen(window[idx].data), idx);
+		printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, window[idx].size, idx);
 		
-		file = fopen(destination,"a");  
-		fputs(window[idx].data, file);
+		file = fopen(destination,"ab"); 
+		fwrite(window[idx].data, 1, window[idx].size, file);
 		fclose(file);
 		
-		available_slots++;
+		int next_seq = window[idx].next_seq;
+		
+		if (window[idx].next_seq == -1){
+		    available_slots = -1;
+		}else{
+		    available_slots++;
+		}
 		
 		//send the ack
 		sendAck(window[idx].hostname, window[idx].seq, available_slots);
+
 		
 		window[idx].received = 0;
 		free(window[idx].data);
@@ -324,11 +362,20 @@ void write_to_file(){
 		
 		window[idx].seq = 0;
 		window[idx].ack = 0;
+		window[idx].next_seq = 0;
+		window[idx].size = 0;
 		
 		written_count++;
 		
 		//move the window
 		window_start++;
+		
+		if (next_seq == -1){
+		    completed = 1;
+		    //usleep(100000);
+		    break;
+		}
+		    
     }
 	
     //mark the index in the sliding window of what we need to write next
@@ -338,6 +385,12 @@ void write_to_file(){
     next_non_written = map_seq_to_window(next_non_written);
  
     pthread_mutex_unlock(&file_lock);
+    
+    if (completed){
+        return 1;
+    }
+        
+    return 0;
 }
 
 int establish_receive_connection() {
@@ -478,7 +531,7 @@ void send_dgram(char *host, char *port, reliable_dgram *dgram){
         return 2;
     }
 
-    if ((numbytes = sendto(sockfd, (char*)dgram, MAXBUFLEN - 1, 0,
+    if ((numbytes = sendto(sockfd,  dgram, MAXBUFLEN - 1, 0,
              p->ai_addr, p->ai_addrlen)) == -1) {
         perror("node: sendto");
         exit(1);

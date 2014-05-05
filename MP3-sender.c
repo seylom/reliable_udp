@@ -15,21 +15,22 @@
 
 #include "helper.h"
 
-#define WINDOW_SIZE 1000
+#define WINDOW_SIZE 100
 #define PACKET_SIZE 1472
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
-#define TIMEOUT 3
+#define TIMEOUT 1
 #define DATA_SIZE (PACKET_SIZE - HEADER_SIZE)
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
 		char* filename, unsigned long long int bytesToTransfer);
-void sendPacket(char* packet);
+void sendPacket(unsigned char *data, int seq, int next_seq, int size, char *hostname);
 int establisb_send_connection(char* host);
 int establish_receive_connection();
 int is_window_entry_timedout(int index);
 void *listen_for_ack(void* data);
 int window_has_room();
+void send_fin_packet(char *hostname);
 
 struct addrinfo hints, *servinfo, *p;
 struct addrinfo *sender_info, *receiver_info;
@@ -40,6 +41,10 @@ int current_seq = 0;
 int window_start = -1;
 int num_bytes_sent = 0;
 int last_seq_ack = 0;
+int read_bytes = 0;
+int max_bytes_requested = 0;
+char server_hostname[256];
+int transfer_complete;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -55,8 +60,9 @@ struct SlidingWindow {
 	int seq;
 	time_t time_sent;
 	int ack;
-	char* data;
+	unsigned char* data;
 	size_t size;
+	int next_seq;
 };
 struct SlidingWindow window[WINDOW_SIZE];
 
@@ -74,9 +80,10 @@ void init(char* filename, int udpPort) {
 		window[i].time_sent = 0;
 		window[i].data = NULL;
 		window[i].size = 0;
+	    window[i].next_seq = 0;
 	}
 	// Open file and keep the handle
-	fp = fopen(filename, "r");
+	fp = fopen(filename, "rb");
 	
 	if(fp == NULL){
 	    fprintf(stderr, "reliable_sender: Unable to open file for reading\n");
@@ -101,6 +108,7 @@ int main(int argc, char** argv) {
 
 	udpPort = (unsigned short int) atoi(argv[2]);
 	numBytes = atoll(argv[4]);
+	max_bytes_requested = numBytes;
 
 	reliablyTransfer(argv[1], udpPort, argv[3], numBytes);
 	return 0;
@@ -110,6 +118,9 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 		char* fileName, unsigned long long int numBytes) {
 
 	init(fileName, udpPort);
+	
+	memcpy(server_hostname, hostName, strlen(hostName));
+	server_hostname[strlen(hostName)] = 0;
 
 	/* Opens the connection for sending packets */
 	send_socket = establisb_send_connection(hostName);
@@ -121,13 +132,12 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 
     int notified_completed = 0;
     int expected_ack = 0;
-    int read_bytes = 0;
 	int total_ack_bytes = 0;
     
     printf("Max number of bytes to send: %d\n", numBytes);
     
 	/* Loop through the file content and send packets to fill a window */
-	while (1) {
+	while (!transfer_complete) {
 		// Sending next packet if there is room in sliding window
 		if (feof(fp) || read_bytes >= numBytes) {
 			if (notified_completed == 0){
@@ -152,7 +162,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    }
 			        
 			    char* packet = calloc(PACKET_SIZE + HEADER_SIZE, 1);
-			    char* data_block = malloc(actual_data_size);
+			    unsigned char* data_block = malloc(actual_data_size);
 			    size_t content_size = fread(data_block, 1, actual_data_size, fp);
 				data_block[content_size] = 0;
 
@@ -170,20 +180,30 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    /* Create a window entry */
 			    int index = map_seq_to_window(current_seq);
 			    window[index].seq = current_seq;
-			    window[index].data = packet;
+			    window[index].data = data_block;
 			    window[index].ack = 0;
 			    window[index].time_sent = (int) time(NULL);
 			    window[index].size = actual_data_size;
 			    
+			    if (read_bytes == max_bytes_requested){
+	                window[index].next_seq = -1;
+	                //printf("Next seq set to: %d\n", -1);
+	            }
+	            else{
+	                window[index].next_seq = current_seq + 1;
+	                //printf("Next seq set to: %d\n", current_seq + 1);
+	            }
+	
+			    
 			    printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n", current_seq, strlen(data_block),read_bytes, numBytes);
 			    
-			    sendPacket(packet);
+			    sendPacket(data_block, current_seq, window[index].next_seq, actual_data_size, hostName);
 			    current_seq++;
 			    
 			    pthread_mutex_unlock(&lock);
 		    } else {
 		        //fprintf(stderr, "reliable_sender: Window has no room : window_start is %d and current_seq is %d\n", window_start, current_seq);
-			    printf("Window is full\n");
+			    //printf("Window is full\n");
 			    //sleep(2);
 				//usleep(100000);
 		    }
@@ -195,23 +215,24 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 		int i = 0;
 		for (i = 0; i < WINDOW_SIZE; i++) {
 			struct SlidingWindow entry = window[i];
-			if (entry.data && is_window_entry_timedout(i)) {
+			if (entry.data && is_window_entry_timedout(i) && 
+			(num_bytes_sent != numBytes) ) {
 			    
 				printf("packet %d is timed out.\n", entry.seq);
 				entry.time_sent = (int) time(NULL);
 				
 				printf("reliable_sender: Re-sending seq #%d of payload size %d\n", entry.seq, entry.size);
 				
-				sendPacket(entry.data);
+				sendPacket(entry.data,  entry.seq, entry.next_seq, entry.size, hostName);
 				
 				expected_ack++;
 			}
 		}
 		
-		if (num_bytes_sent == numBytes){
-		    printf("File successfully transferred!\n");
-		    break;
-		}
+/*		if (num_bytes_sent == numBytes){*/
+/*		    printf("File successfully transferred!\n");*/
+/*		    break;*/
+/*		}*/
 	}
 	
 	close(sender_info);
@@ -244,6 +265,7 @@ void ack_packet(int seq, int receiver_window) {
 		struct SlidingWindow entry = window[index];
 		window[index].ack = 1;
 		window[index].seq = 0;
+		window[index].next_seq = 0;
 		
 		int data_size = window[index].size;
 		num_bytes_sent += data_size;
@@ -365,28 +387,60 @@ int establisb_send_connection(char* hostname) {
 	return sockfd;
 }
 
-void sendPacket(char* packet) {
-	char buffer[PACKET_SIZE + 1];
-	int seq;
-	int size;
-	memcpy(&seq, packet, sizeof(int));
-	memcpy(&size, packet + sizeof(int), sizeof(int));
-	memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
-	buffer[PACKET_SIZE] = '\0';
+void sendPacket(unsigned char *data, int seq, int next_seq, int size, char *hostname) {
+	//char buffer[PACKET_SIZE + 1];
+	//int seq;
+	//int size;
+	
+	int sockfd;
+	int rv;
+	struct addrinfo hints, *servinfo, *p;
+	memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    
+	//memcpy(&seq, packet, sizeof(int));
+	//memcpy(&size, packet + sizeof(int), sizeof(int));
+	//memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
+	//buffer[size] = '\0';
 	
 	struct reliable_dgram dgram;
 	
 	dgram.seq = seq;
 	dgram.size = size;
-	dgram.next_seq = seq + 1;
-	memcpy(dgram.payload, buffer, PACKET_SIZE);
+	dgram.next_seq = next_seq;
 	
+	memcpy(dgram.payload, data, size);
+	
+	//printf("Payload size: %d\n", sizeof(dgram));
+
 	int numbytes;
 
-    if (receiver_info){
-	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0, 
-	            receiver_info->ai_addr, 
-	                receiver_info->ai_addrlen )) == -1) {
+	if ((rv = getaddrinfo(hostname, port, &hints, &servinfo)) != 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+		return 1;
+	}
+
+	// loop through all the results and make a socket
+	for (p = servinfo; p != NULL; p = p->ai_next) {
+		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol))
+				== -1) {
+			perror("talker: socket");
+			continue;
+		}
+
+		break;
+	}
+
+	if (p == NULL) {
+		fprintf(stderr, "talker: failed to bind socket\n");
+		return 2;
+	}
+
+    if (p){
+	    if ((numbytes = sendto(send_socket, &dgram, sizeof(dgram), 0, 
+	            p->ai_addr, p->ai_addrlen )) == -1) {
 	                
 		    perror("packet send:");
 		    exit(1);
@@ -395,6 +449,10 @@ void sendPacket(char* packet) {
 	else{
 	    fprintf(stderr, "Unable to send to the specified receiver: receiver info is %d\n", receiver_info);
 	}
+}
+
+void send_fin_packet(char *hostname){
+    sendPacket("", -1, -1, 0, hostname);
 }
 
 void *listen_for_ack(void* data) {
@@ -418,5 +476,11 @@ void *listen_for_ack(void* data) {
 		//memcpy(&ack_seq, buf, INT_SIZE);
 		//ack_packet(ack_seq);
 		ack_packet(dgram->seq, dgram->window_size);
+		
+		if (dgram->ack_fin == 1){
+		    send_fin_packet(server_hostname);
+		    transfer_complete = 1;
+		    break;
+		}
 	}
 }
