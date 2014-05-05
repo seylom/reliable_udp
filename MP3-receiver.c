@@ -15,7 +15,7 @@
 #include "helper.h"
 
 #define MAXBUFLEN 1500
-#define WINDOW_SIZE 1000
+#define WINDOW_SIZE 2000
 
 typedef struct packet_info{
     char* hostname;
@@ -126,34 +126,25 @@ void *get_in_addr(struct sockaddr *sa) {
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
-/*    if (access(destinationFile, F_OK) != -1){*/
-/*        if (remove(destinationFile) == 0){*/
-/*            //printf("reliable_receiver: existing destination file removed\n");*/
-/*        }*/
-/*    }*/
-    
     file = fopen(destinationFile, "w");
     
     if (file == NULL){
         printf("reliable_receiver: Unable to create the destination file\n");
         exit(1);
     }
-    
-    fclose(file);
-    
+
     memcpy(destination, destinationFile, strlen(destinationFile));
     destination[strlen(destinationFile)] = 0;
     
 	int sockfd = establish_receive_connection();
-	
-	//pthread_t thread;
-	//pthread_create(&thread, NULL, (void*)write_handler,(void*)NULL);
 	
 	int done = 0;
 	
 	while (!done) {
 		done = receivePacket(sockfd);
 	}
+	
+	fclose(file);
 }
 
 void *write_handler(void *datapv){
@@ -194,9 +185,7 @@ int receivePacket(int sockfd) {
 	
 	packet->datagram = malloc(sizeof(*dgram));
 	*(packet->datagram) = *dgram;
-	
-	//fprintf(stderr, "Received packet with sequece %d\n", dgram->seq);
-	
+ 
 	//pthread_t thread;
     //pthread_create(&thread, NULL, (void*)packet_handler, (void*)packet);
 	
@@ -206,7 +195,9 @@ int receivePacket(int sockfd) {
 	   return 1;
 	   
 	if(completed){
+	    printf("Received completed packet\n");
 	    sendAck(packet->hostname, dgram->seq, -1);
+	    sleep(1);
 	    return 1;   
     }
 	
@@ -236,14 +227,9 @@ int packet_handler(void *datapv){
 	
         available_slots--;
         
-	    //dgram->payload[dgram->size] = 0;
-	
 	    process_packet(packet);
 	
 	    done = write_to_file();
-	}
-	else{
-		//printf("Dropping packet seq #%d\n", dgram->seq);
 	}
 	
 	pthread_mutex_unlock(&window_lock);
@@ -260,6 +246,7 @@ void sendAck(char* hostName, int seq, int slots) {
     
     if (slots > -1){
 	    dgram.window_size = slots;
+	    dgram.ack_fin = 0;
 	}
 	else{
 	    dgram.ack_fin = 1;
@@ -337,9 +324,9 @@ int write_to_file(){
             
 		printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, window[idx].size, idx);
 		
-		file = fopen(destination,"ab"); 
-		fwrite(window[idx].data, 1, window[idx].size, file);
-		fclose(file);
+		//file = fopen(destination,"ab"); 
+		fwrite(window[idx].data, window[idx].size, 1, file);
+		//fclose(file);
 		
 		int next_seq = window[idx].next_seq;
 		

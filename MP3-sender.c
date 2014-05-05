@@ -15,7 +15,7 @@
 
 #include "helper.h"
 
-#define WINDOW_SIZE 100
+#define WINDOW_SIZE 1000
 #define PACKET_SIZE 1472
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
@@ -41,8 +41,8 @@ int current_seq = 0;
 int window_start = -1;
 int num_bytes_sent = 0;
 int last_seq_ack = 0;
-int read_bytes = 0;
-int max_bytes_requested = 0;
+unsigned long long int read_bytes = 0;
+unsigned long long int max_bytes_requested = 0;
 char server_hostname[256];
 int transfer_complete;
 
@@ -134,7 +134,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
     int expected_ack = 0;
 	int total_ack_bytes = 0;
     
-    printf("Max number of bytes to send: %d\n", numBytes);
+    printf("Max number of bytes to send: %llu\n", numBytes);
     
 	/* Loop through the file content and send packets to fill a window */
 	while (!transfer_complete) {
@@ -166,7 +166,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    size_t content_size = fread(data_block, 1, actual_data_size, fp);
 				data_block[content_size] = 0;
 
-                read_bytes += content_size;
+                read_bytes += (int)content_size;
                 
 			    /* Copy sequence number  to packet */
 			    memcpy(packet, &current_seq, INT_SIZE);
@@ -185,9 +185,11 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			    window[index].time_sent = (int) time(NULL);
 			    window[index].size = actual_data_size;
 			    
-			    if (read_bytes == max_bytes_requested){
+			    if (read_bytes == numBytes){
 	                window[index].next_seq = -1;
-	                //printf("Next seq set to: %d\n", -1);
+	                //printf("read_bytes : %llu\n", read_bytes);
+	                // printf("numbytes : %llu\n", numBytes);
+	                printf("Next seq set to: %d\n", -1);
 	            }
 	            else{
 	                window[index].next_seq = current_seq + 1;
@@ -195,7 +197,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	            }
 	
 			    
-			    printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n", current_seq, strlen(data_block),read_bytes, numBytes);
+			    printf("reliable_sender: sending seq #%d - payload %d bytes| %llu/%llu bytes\n", current_seq, strlen(data_block),read_bytes, numBytes);
 			    
 			    sendPacket(data_block, current_seq, window[index].next_seq, actual_data_size, hostName);
 			    current_seq++;
