@@ -14,7 +14,7 @@
 
 #include "helper.h"
 
-#define MAXBUFLEN 9028
+#define MAXBUFLEN 1500
 #define WINDOW_SIZE 10000
 
 typedef struct packet_info{

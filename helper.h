@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define DATA_SIZE 9000
+#define DATA_SIZE 1472
 
 typedef struct reliable_dgram{
     int seq;    //the sequence number being sent (used by the client)
