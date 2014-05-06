@@ -14,11 +14,5 @@
 #include <fcntl.h>
 
 #define DATA_SIZE 1470
-
-typedef struct reliable_dgram{
-    int seq;    //the sequence number being sent (used by the client)
-    int size;   //the size of the payload
-    int window_size;    //set by the server to advertize its window size
-    char payload[DATA_SIZE];    //the actual data.
-    int next_seq; //set to the next expected sequence; -1 indicate no more sequence.
-}reliable_dgram;
+#define MAXBUFLEN 1500
+#define WINDOW_SIZE 100

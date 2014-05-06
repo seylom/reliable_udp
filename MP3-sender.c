@@ -15,12 +15,10 @@
 
 #include "helper.h"
 
-#define WINDOW_SIZE 100
-#define PACKET_SIZE 1470
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
 #define TIMEOUT 2
-#define DATA_SIZE (PACKET_SIZE - HEADER_SIZE)
+#define PAYLOAD_SIZE (DATA_SIZE - HEADER_SIZE)
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
 		char* filename, unsigned long long int bytesToTransfer);
@@ -132,13 +130,13 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			pthread_mutex_lock(&lock);
 			// Calculating how many bytes to pack into the packet
 			int actual_data_size = 0;
-			if (numBytes - read_bytes < DATA_SIZE) {
+			if (numBytes - read_bytes < PAYLOAD_SIZE) {
 				actual_data_size = numBytes - read_bytes;
 			} else {
-				actual_data_size = DATA_SIZE;
+				actual_data_size = PAYLOAD_SIZE;
 			}
 
-			unsigned char* packet = malloc(PACKET_SIZE);
+			unsigned char* packet = malloc(DATA_SIZE);
 			unsigned char* data_block = malloc(actual_data_size);
 			size_t content_size = fread(data_block, 1, actual_data_size, fp);
 
@@ -162,8 +160,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			entry.time_sent = (int) time(NULL);
 			entry.size = content_size;
 
-			printf(
-					"reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n",
+			printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n",
 					current_seq, strlen(data_block), read_bytes, numBytes);
 
 			sendPacket(packet);
@@ -250,21 +247,15 @@ void ack_packet(int seq) {
 		printf("reliable_sender: Duplicate ACK received for seq #%d\n", seq);
 	}
 
-// Slide window as more packets get ack
+	// Slide window as more packets get ack
 	int slide_value = 0;
 	while (window[map_seq_to_window(window_start + 1)].ack
-			&& slide_value < WINDOW_SIZE - 1 /*&& receiver_window > 0*/) {
+			&& slide_value < WINDOW_SIZE - 1) {
 		slide_value++;
 		window_start++;
 		window[map_seq_to_window(window_start)].ack = 0; // reseting ack
 		printf("reliable_sender: window start for seq# %d is set to %d\n", seq,
 				window_start);
-
-//		receiver_window--;
-//
-//		if (receiver_window == 0) {
-//			printf("reliable_sender: Reached receiver advertized limit %d\n");
-//		}
 	}
 
 	pthread_mutex_unlock(&lock);
@@ -277,40 +268,11 @@ void sendPacket(unsigned char* packet) {
 	if (receiver_info) {
 		if ((sentBytes = sendto(send_socket, packet, size + HEADER_SIZE, 0,
 				receiver_info->ai_addr, receiver_info->ai_addrlen)) == -1) {
-
 			perror("packet send:");
 			exit(1);
 		}
 	}
 }
-//void sendPacket(char* packet) {
-//	char buffer[PACKET_SIZE + 1];
-//	int seq;
-//	int size;
-//	memcpy(&seq, packet, sizeof(int));
-//	memcpy(&size, packet + sizeof(int), sizeof(int));
-//	memcpy(buffer, packet + HEADER_SIZE, PACKET_SIZE);
-//	buffer[PACKET_SIZE] = '\0';
-//
-//	struct reliable_dgram dgram;
-//
-//	dgram.seq = seq;
-//	dgram.size = size;
-//	dgram.next_seq = seq + 1;
-//	memcpy(dgram.payload, buffer, PACKET_SIZE);
-//
-//	int numbytes;
-//
-//    if (receiver_info){
-//	    if ((numbytes = sendto(send_socket, (char*)(&dgram), PACKET_SIZE + HEADER_SIZE, 0,
-//	            receiver_info->ai_addr,
-//	                receiver_info->ai_addrlen )) == -1) {
-//
-//		    perror("packet send:");
-//		    exit(1);
-//	    }
-//	}
-//}
 
 void *listen_for_ack(void* data) {
 	printf("listening thread is started ...\n");
@@ -318,21 +280,15 @@ void *listen_for_ack(void* data) {
 	struct sockaddr_storage their_addr;
 	socklen_t addr_len = sizeof their_addr;
 	while (1) {
-		int numbytes;
-		char buf[PACKET_SIZE];
-		if ((numbytes = recvfrom(receive_socket, buf, PACKET_SIZE - 1, 0,
+		unsigned char buf[INT_SIZE];
+		int akc_seq;
+		if ((recvfrom(receive_socket, buf, INT_SIZE, 0,
 				(struct sockaddr *) &their_addr, &addr_len)) == -1) {
 			perror("ack recv");
 			exit(1);
 		}
-
-		//int ack_seq;
-
-		reliable_dgram *dgram = (reliable_dgram *) buf;
-
-		//memcpy(&ack_seq, buf, INT_SIZE);
-		//ack_packet(ack_seq);
-		ack_packet(dgram->seq);
+		memcpy(&akc_seq, buf, INT_SIZE);
+		ack_packet(akc_seq);
 	}
 }
 
@@ -350,7 +306,7 @@ int establish_send_connection(char* hostname) {
 		return 1;
 	}
 
-// loop through all the results and make a socket
+	// loop through all the results and make a socket
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol))
 				== -1) {
@@ -385,7 +341,7 @@ int establish_receive_connection() {
 		return 1;
 	}
 
-// loop through all the results and bind to the first we can
+	// loop through all the results and bind to the first we can
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol))
 				== -1) {
@@ -409,6 +365,5 @@ int establish_receive_connection() {
 	sender_info = malloc(sizeof *p);
 	*sender_info = *p;
 	freeaddrinfo(servinfo);
-//printf("listener: waiting to recvfrom...\n");
 	return sockfd;
 }
