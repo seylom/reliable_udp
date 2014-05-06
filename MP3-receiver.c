@@ -17,7 +17,7 @@
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile);
 int establish_receive_connection();
 int establish_send_connection(char* hostname);
-void write_to_file();
+int write_to_file();
 void initialize_window();
 int map_seq_to_window(int seq);
 void *write_handler(void *datapv);
@@ -58,6 +58,7 @@ int next_expected_packet;
 volatile int window_start = 0;
 int current_seq = 0;
 int next_non_written = 0;
+long long int last_seq = -1;
 
 /* Maps the actual sequence number to a index in sliding window */
 int map_seq_to_window(int seq) {
@@ -126,43 +127,81 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 	pthread_t thread;
 	pthread_create(&thread, NULL, (void*)write_handler,(void*)NULL);
 	
-	while (!done) {
-		receivePacket(sockfd);
+	int all_done = 0;
+	
+	while (!all_done) {
+		all_done = receivePacket(sockfd);
 	}
 }
 
 void *write_handler(void *datapv){
-
-	while(1){
+    
+    int stop = 0;
+    
+	while(!stop){
 		pthread_mutex_lock(&window_lock);	
-		write_to_file();	
+		stop = write_to_file();	
 		pthread_mutex_unlock(&window_lock);
-		usleep(100000);
 	}
 }
 
-void receivePacket(int sockfd) {
+int receivePacket(int sockfd) {
 	int numbytes;
 	unsigned char buf[MAXBUFLEN];
 	char s[INET6_ADDRSTRLEN];
 	socklen_t addr_len = sizeof their_addr;
+	int drop_packet = 0;
 
 	if ((numbytes = recvfrom(sockfd, buf, MAXBUFLEN - 1, 0,
 			(struct sockaddr *) &their_addr, &addr_len)) == -1) {
 		perror("recvfrom");
 		exit(1);
 	}
+	
+	if (sender_host_name == NULL) {
+		sender_host_name = inet_ntop(their_addr.ss_family,
+		get_in_addr((struct sockaddr *) &their_addr), s, sizeof s);
+		send_sock = establish_send_connection(sender_host_name);
+	}
+	
+	//adding drop packets behavior
+	if (drop_packet){
+	    //int random_number = rand() % range + min;
+	    int random_number = rand() % 5 + 1;
+	    
+	    if (random_number == 1){
+	        //printf("droping packet....\n");
+	        return 0;
+	    }
+	}
 
 	// 4 bytes is end of stream notification
-	if(numbytes == 4) {
-		sleep(2);
-		done = 1 ;
-	} else {
-		if (sender_host_name == NULL) {
-			sender_host_name = inet_ntop(their_addr.ss_family,
-				get_in_addr((struct sockaddr *) &their_addr), s, sizeof s);
-			send_sock = establish_send_connection(sender_host_name);
+	if(strncmp(buf, "DONE_TRANSFER", 13) == 0) {
+	    char *token, *running;
+		running = strdup(buf);
+		char delimiters[] = "|";
+		
+		token = strsep (&running, delimiters);
+		token = strsep (&running, delimiters);
+		unsigned long long int last_value = atoll(token);
+		
+		//printf("received FIN, last seq is #%llu\n", last_value);
+		
+		if (last_seq == -1){
+		    last_seq = last_value;
 		}
+		else{
+		    if (window_start > 0){	        
+		        if (window_start > last_seq){
+		            //printf("reliable_receiver: sending FIN_ACK\n");
+		            sendAck(sender_host_name, -1, -1); //this is the fin_ack
+		        }
+		    }
+		}
+	}else if (strncmp(buf, "CLOSE_TRANSFER", 14) == 0){
+        return 1;
+	}
+	else {
 
 		int seq;
 		int size;
@@ -171,18 +210,22 @@ void receivePacket(int sockfd) {
 		unsigned char* payload = malloc(size);
 		memcpy(payload, buf + 2*sizeof(int), size);
 
+        if (last_seq > 0 && window_start > last_seq){
+            
+        }
+        
 		if (available_slots > 0){
 			if (seq > (window_start + WINDOW_SIZE)){
 				printf("Packet with seq #%d out of bound for window\n",seq);
-				return;
+				return 0;
 			}
 
 			available_slots--;
 			//store packet in window
 			int slot = map_seq_to_window(seq);
 			if (window[slot].received == 1 && window[slot].written == 0){
-				printf("reliable_receiver: Attempt to override packet not yet consumed\n");
-				return;
+				//printf("reliable_receiver: Attempt to override packet not yet consumed\n");
+				return 0;
 			}
 			window[slot].received = 1;
 			window[slot].written = 0;
@@ -192,6 +235,8 @@ void receivePacket(int sockfd) {
 			window[slot].data = payload;
 		}
 	}
+	
+	return 0;
 }
 
 void sendAck(char* hostName, int seq, int slots) {
@@ -210,7 +255,7 @@ void sendAck(char* hostName, int seq, int slots) {
 /*
 *Writes the provided data to the destination file
 */
-void write_to_file(){
+int write_to_file(){
     int i = 0;
     int written_count = 0;
     
@@ -225,7 +270,7 @@ void write_to_file(){
 		if (window[idx].received == 0)
 			break;
             
-		printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, strlen(window[idx].data), idx);
+		//printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, strlen(window[idx].data), idx);
 
 		fwrite(window[idx].data, 1, window[idx].size , file);
 		available_slots++;
@@ -249,7 +294,11 @@ void write_to_file(){
     
     //wrap it around
     next_non_written = map_seq_to_window(next_non_written);
+    
+    if (last_seq > 0 && window_start > last_seq)
+        return 1;
  
+    return 0;
     //pthread_mutex_unlock(&file_lock);
 }
 
@@ -257,9 +306,10 @@ int establish_receive_connection() {
 	int sockfd;
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
+	int yes = 1;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC; // set to AF_INET to force IPv4
+	hints.ai_family = AF_INET; // set to AF_INET to force IPv4
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE; // use my IP
 
@@ -275,6 +325,12 @@ int establish_receive_connection() {
 			perror("reliable_receiver: socket");
 			continue;
 		}
+		
+	    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(1);
+        }
 
 		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			close(sockfd);
@@ -299,7 +355,7 @@ int establish_send_connection(char* hostname) {
 	int rv;
 	struct addrinfo hints, *servinfo, *p;
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_DGRAM;
 
 	if ((rv = getaddrinfo(hostname, send_port, &hints, &servinfo)) != 0) {

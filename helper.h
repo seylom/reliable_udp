@@ -15,4 +15,4 @@
 
 #define DATA_SIZE 1470
 #define MAXBUFLEN 1500
-#define WINDOW_SIZE 100
+#define WINDOW_SIZE 2000

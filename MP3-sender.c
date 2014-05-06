@@ -30,15 +30,17 @@ void *listen_for_ack(void* data);
 int window_has_room();
 void send_eof_notification();
 
-struct addrinfo hints, *servinfo, *p;
+//struct addrinfo hints, *servinfo, *p;
 struct addrinfo *sender_info, *receiver_info;
 
 int send_socket;
 int receive_socket;
 int current_seq = 0;
 int window_start = -1;
-int num_bytes_sent = 0;
+volatile unsigned long long int num_bytes_sent = 0;
 int last_seq_ack = 0;
+int last_seq = 0;
+int fin_ack_received = 0;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -48,13 +50,14 @@ FILE* fp;
 /* Port number for sending and receiving */
 char port[6];
 char ack_port[6];
+char host[256];
 
 /* Sliding Window data structure*/
 struct SlidingWindow {
 	int seq;
 	time_t time_sent;
 	int ack;
-	char* data;
+	unsigned char* data;
 	size_t size;
 };
 struct SlidingWindow window[WINDOW_SIZE];
@@ -93,7 +96,9 @@ int main(int argc, char** argv) {
 	}
 
 	udpPort = (unsigned short int) atoi(argv[2]);
-	numBytes = atoll(argv[4]);
+	numBytes = strtoull(argv[4], NULL, 10);
+	
+	memcpy(host,argv[1], strlen(argv[1]));
 
 	reliablyTransfer(argv[1], udpPort, argv[3], numBytes);
 	return 0;
@@ -110,28 +115,28 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	/* Start listening for ack */
 	pthread_t thread;
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
-	//sleep(1);
 
 	int expected_ack = 0;
-	int read_bytes = 0;
+	unsigned long long int read_bytes = 0;
 	int total_ack_bytes = 0;
 
-	printf("Max number of bytes to send: %d\n", numBytes);
+	printf("Max number of bytes to send: %llu\n", numBytes);
 
 	/* Loop through the file content and send packets to fill a window */
 	while (1) {
 		// Check if file is all read or enough bytes are sent
 		if (feof(fp) || read_bytes >= numBytes) {
-			printf(
-					"reliable_sender: All file blocks were fully added to the window.\n");
+			//printf("reliable_sender: All file blocks were fully added to the window.\n");
 			send_eof_notification();
-			break;
+			usleep(100000);
+			//break;
 		} else if (window_has_room()) { // Sending next packet if there is room in sliding window
 			pthread_mutex_lock(&lock);
 			// Calculating how many bytes to pack into the packet
 			int actual_data_size = 0;
 			if (numBytes - read_bytes < PAYLOAD_SIZE) {
 				actual_data_size = numBytes - read_bytes;
+				last_seq = current_seq;
 			} else {
 				actual_data_size = PAYLOAD_SIZE;
 			}
@@ -154,48 +159,51 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			/* Create a window entry */
 			int index = map_seq_to_window(current_seq);
 			struct SlidingWindow entry = window[index];
-			entry.seq = current_seq;
-			entry.data = packet;
-			entry.ack = 0;
-			entry.time_sent = (int) time(NULL);
-			entry.size = content_size;
-
-			printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n",
-					current_seq, strlen(data_block), read_bytes, numBytes);
+			window[index].seq = current_seq;
+			window[index].data = packet;
+			//window[index].data= malloc(sizeof(unsigned char) * content_size);
+			memcpy(window[index].data, packet, content_size);
+			
+			window[index].ack = 0;
+			window[index].time_sent = (int) time(NULL);
+			window[index].size = content_size;
+			
+			//printf("reliable_sender: sending seq #%d - payload %d bytes| %d/%d bytes\n", current_seq, strlen(data_block), read_bytes, numBytes);
 
 			sendPacket(packet);
 			current_seq++;
 
 			pthread_mutex_unlock(&lock);
 		} else {
-			printf("Window is full\n");
+			//printf("Window is full\n");
 			//sleep(2);
-			usleep(100000);
+			//usleep(100000);
 		}
 		// check sent packets and re-send timed out ones
 
-		int i = 0;
-		for (i = 0; i < WINDOW_SIZE; i++) {
-			struct SlidingWindow entry = window[i];
-			if (entry.data && is_window_entry_timedout(i)) {
-
-				printf("packet %d is timed out.\n", entry.seq);
-				entry.time_sent = (int) time(NULL);
-
-				printf(
-						"reliable_sender: Re-sending seq #%d of payload size %d\n",
-						entry.seq, entry.size);
-
-				sendPacket(entry.data);
-
-				expected_ack++;
-			}
-		}
-
-		if (total_ack_bytes == numBytes) {
+        if (fin_ack_received == 1) {
 			printf("File successfully transferred!\n");
 			break;
 		}
+		else{
+		    int i = 0;
+		    for (i = 0; i < WINDOW_SIZE; i++) {
+			    struct SlidingWindow entry = window[i];
+			    if (window[i].data  && is_window_entry_timedout(i)) {
+
+				    printf("packet %d is timed out.\n", entry.seq);
+				    window[i].time_sent = (int) time(NULL);
+
+				    printf("reliable_sender: Re-sending seq #%d\n", entry.seq);
+
+				    sendPacket(entry.data);
+
+				    expected_ack++;
+				    
+				    //usleep(1000000);
+			    }
+		    }
+         }
 	}
 }
 
@@ -210,16 +218,19 @@ int is_window_entry_timedout(int index) {
 
 /* Send a notification of 4 bytes to receiver notifying it that transfer is over */
 void send_eof_notification() {
-	char buffer[] = "DONE";
-	int numbytes;
-	if (receiver_info) {
-		if ((numbytes = sendto(send_socket, buffer, strlen(buffer), 0,
-				receiver_info->ai_addr, receiver_info->ai_addrlen)) == -1) {
+	char buffer[256];
+	bzero(buffer, 256);
+	int nchars = sprintf(buffer, "DONE_TRANSFER|%d", last_seq);
+	buffer[nchars] = 0;
+	
+	send_data(buffer, strlen(buffer));
+}
 
-			perror("packet send:");
-			exit(1);
-		}
-	}
+/* Send a cose notification */
+void send_close_notification() {
+	char buffer[] = "CLOSE_TRANSFER";
+	
+    send_data(buffer, strlen(buffer));
 }
 
 int window_has_room() {
@@ -230,6 +241,14 @@ int window_has_room() {
 
 void ack_packet(int seq) {
 	pthread_mutex_lock(&lock);
+	
+	if (seq == -1){
+	    send_close_notification();
+	    usleep(200000);
+	    fin_ack_received = 1;
+	    printf("reliable_sender: received FIN_ACK\n");
+	    return;
+	}  
 
 	int index = map_seq_to_window(seq);
 
@@ -254,24 +273,61 @@ void ack_packet(int seq) {
 		slide_value++;
 		window_start++;
 		window[map_seq_to_window(window_start)].ack = 0; // reseting ack
-		printf("reliable_sender: window start for seq# %d is set to %d\n", seq,
-				window_start);
+		//printf("reliable_sender: window start for seq# %d is set to %d\n", seq, window_start);
 	}
 
 	pthread_mutex_unlock(&lock);
 }
 
 void sendPacket(unsigned char* packet) {
-	int size;
+	int size;	
 	memcpy(&size, packet + sizeof(int), sizeof(int));
+	
+	send_data(packet, size + HEADER_SIZE);
+}
+
+void send_data(void *data, int size){
+    
+    int sockfd;
+    struct addrinfo hints, *servinfo, *p;
+    int rv;
+    int numbytes;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if ((rv = getaddrinfo(host, port, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+        return 1;
+    }
+
+    // loop through all the results and make a socket
+    for(p = servinfo; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                p->ai_protocol)) == -1) {
+            perror("reliable_sender: socket");
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL) {
+        fprintf(stderr, "reliable_sender: failed to bind socket\n");
+        return 2;
+    }
+
 	int sentBytes;
-	if (receiver_info) {
-		if ((sentBytes = sendto(send_socket, packet, size + HEADER_SIZE, 0,
-				receiver_info->ai_addr, receiver_info->ai_addrlen)) == -1) {
+	if (sockfd) {
+		if ((sentBytes = sendto(sockfd, data, size, 0,
+				p->ai_addr, p->ai_addrlen)) == -1) {
 			perror("packet send:");
 			exit(1);
 		}
 	}
+	
+	close(sockfd);
 }
 
 void *listen_for_ack(void* data) {
@@ -297,9 +353,11 @@ int establish_send_connection(char* hostname) {
 	int rv;
 	struct addrinfo hints, *servinfo, *p;
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_INET;
+	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE;
+	
+	printf("%s\n", hostname);
 
 	if ((rv = getaddrinfo(hostname, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
@@ -322,7 +380,9 @@ int establish_send_connection(char* hostname) {
 	}
 	receiver_info = malloc(sizeof *p);
 	*receiver_info = *p;
+	
 	freeaddrinfo(servinfo);
+	
 	return sockfd;
 }
 
@@ -330,9 +390,10 @@ int establish_receive_connection() {
 	int sockfd;
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
+	int yes = 1;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC; // set to AF_INET to force IPv4
+	hints.ai_family = AF_INET; // set to AF_INET to force IPv4
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE; // use my IP
 
@@ -348,6 +409,12 @@ int establish_receive_connection() {
 			perror("listener: socket");
 			continue;
 		}
+		
+		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(1);
+        }
 
 		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			close(sockfd);
