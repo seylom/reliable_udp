@@ -271,6 +271,7 @@ int write_to_file(){
 			break;
 
 		fwrite(window[idx].data, 1, window[idx].size , file);
+		
 		available_slots++;
 		
 		//send the ack

@@ -8,16 +8,17 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/wait.h>
+#include <sys/wait.h> 
+#include <pthread.h>
 #include <signal.h>
 #include <time.h>
-#include <pthread.h>
 
 #include "helper.h"
 
+#define SIG SIGUSR1
 #define INT_SIZE sizeof(int)
 #define HEADER_SIZE 2*INT_SIZE
-#define TIMEOUT 2
+#define TIMEOUT 1
 #define PAYLOAD_SIZE (DATA_SIZE - HEADER_SIZE)
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport,
@@ -29,6 +30,7 @@ int is_window_entry_timedout(int index);
 void *listen_for_ack(void* data);
 int window_has_room();
 void send_eof_notification();
+void *resend_timed_out_packets(void *pdata);
 
 //struct addrinfo hints, *servinfo, *p;
 struct addrinfo *sender_info, *receiver_info;
@@ -41,7 +43,7 @@ volatile unsigned long long int num_bytes_sent = 0;
 int last_seq_ack = 0;
 int last_seq = 0;
 int fin_ack_received = 0;
-
+timer_t window_slot_timer;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Pointer to the file to be sent */
@@ -61,6 +63,42 @@ struct SlidingWindow {
 	size_t size;
 };
 struct SlidingWindow window[WINDOW_SIZE];
+
+void start_timer(timer_t timer, int seconds)
+{
+	struct itimerspec spec;
+
+	spec.it_value.tv_sec = seconds;
+	spec.it_value.tv_nsec = 0;
+	spec.it_interval.tv_sec = 0;
+	spec.it_interval.tv_nsec = 0;
+
+    if (timer_settime(timer, 0, &spec, NULL) == -1) {
+		perror("timer_settime");
+		exit(1);
+	}
+}
+
+void time_elapsed(){
+    
+}
+
+void setup_timer(){ 
+
+	struct sigaction action;
+	struct sigevent event;
+
+    action.sa_flags = SA_SIGINFO;
+    action.sa_sigaction = time_elapsed;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIG, &action, NULL);
+
+    event.sigev_notify = SIGEV_SIGNAL;
+    event.sigev_signo = SIG;
+    event.sigev_value.sival_ptr = &window_slot_timer;
+    timer_create(CLOCK_REALTIME, &event, &window_slot_timer);
+}
+
 
 /* Maps the actual sequence number to a index in sliding window */
 int map_seq_to_window(int seq) {
@@ -121,6 +159,10 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	int total_ack_bytes = 0;
 
 	printf("Max number of bytes to send: %llu\n", numBytes);
+	
+	pthread_t thread2;
+	pthread_create(&thread2, NULL, (void*) resend_timed_out_packets, NULL);
+
 
 	/* Loop through the file content and send packets to fill a window */
 	while (1) {
@@ -186,25 +228,50 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			break;
 		}
 		else{
-		    int i = 0;
-		    for (i = 0; i < WINDOW_SIZE; i++) {
-			    struct SlidingWindow entry = window[i];
-			    if (window[i].data  && is_window_entry_timedout(i)) {
+/*		    int i = 0;*/
+/*		    pthread_mutex_lock(&lock);*/
+/*		    for (i = 0; i < WINDOW_SIZE; i++) {*/
+/*			    struct SlidingWindow entry = window[i];*/
+/*			    if (window[i].data  && is_window_entry_timedout(i)) {*/
 
-				    printf("packet %d is timed out.\n", entry.seq);
-				    window[i].time_sent = (int) time(NULL);
+/*				    printf("packet %d is timed out.\n", entry.seq);*/
+/*				    window[i].time_sent = (int) time(NULL);*/
 
-				    printf("reliable_sender: Re-sending seq #%d\n", entry.seq);
+/*				    //printf("reliable_sender: Re-sending seq #%d\n", entry.seq);*/
 
-				    sendPacket(entry.data);
+/*				    sendPacket(entry.data);*/
 
-				    expected_ack++;
-				    
-				    //usleep(1000000);
-			    }
-		    }
+/*				    expected_ack++;*/
+/*				    */
+/*				    //usleep(1000000);*/
+/*			    }*/
+/*		    }*/
+/*		    pthread_mutex_unlock(&lock);*/
          }
 	}
+}
+
+void *resend_timed_out_packets(void *data){
+
+    while(!fin_ack_received){
+        int i = 0;
+	    pthread_mutex_lock(&lock);
+	    for (i = 0; i < WINDOW_SIZE; i++) {
+		    struct SlidingWindow entry = window[i];
+		    if (window[i].data  && is_window_entry_timedout(i)) {
+
+			    printf("packet %d is timed out.\n", entry.seq);
+			    window[i].time_sent = (int) time(NULL);
+
+			    //printf("reliable_sender: Re-sending seq #%d\n", entry.seq);
+
+			    sendPacket(entry.data);
+			    
+			    //usleep(1000000);
+		    }
+	    }
+	    pthread_mutex_unlock(&lock);
+    }
 }
 
 int is_window_entry_timedout(int index) {
@@ -287,7 +354,6 @@ void sendPacket(unsigned char* packet) {
 }
 
 void send_data(void *data, int size){
-    
     int sockfd;
     struct addrinfo hints, *servinfo, *p;
     int rv;
@@ -328,6 +394,12 @@ void send_data(void *data, int size){
 	}
 	
 	close(sockfd);
+}
+
+
+void *send_data_thread(){
+    
+        
 }
 
 void *listen_for_ack(void* data) {

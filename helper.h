@@ -13,6 +13,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define DATA_SIZE 1470
-#define MAXBUFLEN 1500
-#define WINDOW_SIZE 2000
+#define DATA_SIZE 60000
+#define MAXBUFLEN 60028
+#define WINDOW_SIZE 20
