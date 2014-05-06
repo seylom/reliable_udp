@@ -110,7 +110,6 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 	/* Start listening for ack */
 	pthread_t thread;
 	pthread_create(&thread, NULL, (void*) listen_for_ack, NULL);
-	//sleep(1);
 
 	int expected_ack = 0;
 	int read_bytes = 0;
@@ -169,8 +168,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			pthread_mutex_unlock(&lock);
 		} else {
 			printf("Window is full\n");
-			//sleep(2);
-			usleep(100000);
+			//usleep(100000);
 		}
 		// check sent packets and re-send timed out ones
 

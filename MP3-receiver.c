@@ -20,15 +20,13 @@ int establish_send_connection(char* hostname);
 void write_to_file();
 void initialize_window();
 int map_seq_to_window(int seq);
+void receivePacket(int sockfd);
 void *write_handler(void *datapv);
 
 struct sockaddr_storage their_addr;
-char destination[256];
 
 char* sender_host_name = NULL;
-
 int done = 0 ;
-
 int send_sock;
 
 struct window_slot{
@@ -37,8 +35,7 @@ struct window_slot{
      int received;
      int seq;
      int size;
-     char *data;
-	 char *hostname;
+     unsigned char *data;
 };
 
 struct window_slot window[WINDOW_SIZE];
@@ -132,7 +129,6 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 }
 
 void *write_handler(void *datapv){
-
 	while(1){
 		pthread_mutex_lock(&window_lock);	
 		write_to_file();	
@@ -184,12 +180,16 @@ void receivePacket(int sockfd) {
 				printf("reliable_receiver: Attempt to override packet not yet consumed\n");
 				return;
 			}
+			pthread_mutex_lock(&window_lock);
+
 			window[slot].received = 1;
 			window[slot].written = 0;
 			window[slot].ack = 0;
 			window[slot].seq = seq;
 			window[slot].size = size;
 			window[slot].data = payload;
+
+			pthread_mutex_unlock(&window_lock);
 		}
 	}
 }
@@ -206,7 +206,6 @@ void sendAck(char* hostName, int seq, int slots) {
 		}
 	}
 }
-
 /*
 *Writes the provided data to the destination file
 */
@@ -225,7 +224,7 @@ void write_to_file(){
 		if (window[idx].received == 0)
 			break;
             
-		printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, strlen(window[idx].data), idx);
+		printf("reliable_receiver: writing seq#%d of size %d to file from slot %d\n", window[idx].seq, window[idx].size, idx);
 
 		fwrite(window[idx].data, 1, window[idx].size , file);
 		available_slots++;
@@ -249,8 +248,6 @@ void write_to_file(){
     
     //wrap it around
     next_non_written = map_seq_to_window(next_non_written);
- 
-    //pthread_mutex_unlock(&file_lock);
 }
 
 int establish_receive_connection() {
