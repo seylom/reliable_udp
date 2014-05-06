@@ -168,7 +168,7 @@ void reliablyTransfer(char* hostName, unsigned short int udpPort,
 			pthread_mutex_unlock(&lock);
 		} else {
 			printf("Window is full\n");
-			//usleep(100000);
+			usleep(100000);
 		}
 		// check sent packets and re-send timed out ones
 
