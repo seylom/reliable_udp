@@ -20,7 +20,7 @@ int establish_send_connection(char* hostname);
 int write_to_file();
 void initialize_window();
 int map_seq_to_window(int seq);
-void receivePacket(int sockfd);
+int receivePacket(int sockfd);
 void *write_handler(void *datapv);
 
 struct sockaddr_storage their_addr;
@@ -132,14 +132,10 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 }
 
 void *write_handler(void *datapv){
-<<<<<<< HEAD
-    
+
     int stop = 0;
     
 	while(!stop){
-=======
-	while(1){
->>>>>>> 1db62d7b252d64c9eb71aef0e63620a8146eb5e8
 		pthread_mutex_lock(&window_lock);	
 		stop = write_to_file();	
 		pthread_mutex_unlock(&window_lock);
@@ -273,12 +269,6 @@ int write_to_file(){
 		
 		if (window[idx].received == 0)
 			break;
-            
-<<<<<<< HEAD
-		//printf("reliable_receiver: writting seq#%d of size %d to file from slot %d\n", window[idx].seq, strlen(window[idx].data), idx);
-=======
-		printf("reliable_receiver: writing seq#%d of size %d to file from slot %d\n", window[idx].seq, window[idx].size, idx);
->>>>>>> 1db62d7b252d64c9eb71aef0e63620a8146eb5e8
 
 		fwrite(window[idx].data, 1, window[idx].size , file);
 		available_slots++;
@@ -302,15 +292,11 @@ int write_to_file(){
     
     //wrap it around
     next_non_written = map_seq_to_window(next_non_written);
-<<<<<<< HEAD
-    
+
     if (last_seq > 0 && window_start > last_seq)
         return 1;
  
     return 0;
-    //pthread_mutex_unlock(&file_lock);
-=======
->>>>>>> 1db62d7b252d64c9eb71aef0e63620a8146eb5e8
 }
 
 int establish_receive_connection() {
